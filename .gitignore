@@ -1,0 +1,12 @@
+kine
+*.tmp
+*.o
+*.obj
+*.dll
+*.so
+*.dylib
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
