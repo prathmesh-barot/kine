@@ -15,6 +15,32 @@ Pending_Two_Key :: struct {
     handler: proc(ed: ^Editor, key: Key),
 }
 
+Operator_Kind :: enum {
+    None,
+    Delete,
+    Change,
+    Yank,
+    Indent,
+    Dedent,
+    AutoIndent,
+    Uppercase,
+    Lowercase,
+    ToggleCase,
+}
+
+Pending_Op :: struct {
+    kind:      Operator_Kind,
+    count:     int,
+    motion:    proc(ed: ^Editor, w: ^Window, buf: ^Buffer, count: int) -> (int, int),
+    text_obj:  bool,
+}
+
+Jump_Entry :: struct {
+    buf_id: int,
+    row:    int,
+    col:    int,
+}
+
 Editor :: struct {
     buffers:          [dynamic]^Buffer,
     windows:          [dynamic]^Window,
@@ -29,10 +55,12 @@ Editor :: struct {
     count_buf:        [16]u8,
     count_buf_len:    int,
     pending_two_key:  Maybe(Pending_Two_Key),
+    pending_op:       Maybe(Pending_Op),
     unnamed_register: string,
     undo_stack:       Undo_Stack,
     last_change:      Last_Change,
     message:          string,
+    color_mode:       Color_Mode,
     term_cols:        int,
     term_rows:        int,
     term_state:       Terminal_State,
@@ -40,6 +68,10 @@ Editor :: struct {
     current_screen:   Screen,
     desired_screen:   Screen,
     running:          bool,
+    search_pattern:   string,
+    search_direction: int,
+    jumplist:         [dynamic]Jump_Entry,
+    jump_idx:         int,
 }
 
 Tab :: struct {
@@ -102,12 +134,195 @@ process_key :: proc(ed: ^Editor, key: Key) {
             ed.mode = .Normal
             clear_visual(ed)
         } else {
-            normal_mode_handle_key(ed, key)
+            visual_mode_handle_key(ed, key)
         }
     case .Operator_Pending:
-        ed.mode = .Normal
-        normal_mode_handle_key(ed, key)
+        operator_pending_handle_key(ed, key)
     }
+}
+
+operator_pending_handle_key :: proc(ed: ^Editor, key: Key) {
+    w := ed.active_window
+    if w == nil { ed.mode = .Normal; return }
+
+    if key.special == .Escape {
+        ed.mode = .Normal
+        ed.pending_op = nil
+        return
+    }
+
+    op, has_op := ed.pending_op.?
+    if !has_op { ed.mode = .Normal; return }
+
+    buf := w.buffer
+    count := op.count
+
+    switch {
+    case key.codepoint == 'w':
+        start := line_cursor_to_abs(buf, w.cursor)
+        for i := 0; i < count; i += 1 {
+            cursor_move_word_forward(&w.cursor, buf)
+        }
+        end := line_cursor_to_abs(buf, w.cursor)
+        apply_operator(ed, op.kind, start, end)
+
+    case key.codepoint == 'b':
+        start := line_cursor_to_abs(buf, w.cursor)
+        for i := 0; i < count; i += 1 {
+            cursor_move_word_backward(&w.cursor, buf)
+        }
+        end := line_cursor_to_abs(buf, w.cursor)
+        if end > start { end, start = start, end }
+        apply_operator(ed, op.kind, end, start)
+
+    case key.codepoint == 'W':
+        start := line_cursor_to_abs(buf, w.cursor)
+        for i := 0; i < count; i += 1 {
+            cursor_move_WORD_forward(&w.cursor, buf)
+        }
+        end := line_cursor_to_abs(buf, w.cursor)
+        apply_operator(ed, op.kind, start, end)
+
+    case key.codepoint == 'B':
+        start := line_cursor_to_abs(buf, w.cursor)
+        for i := 0; i < count; i += 1 {
+            cursor_move_WORD_backward(&w.cursor, buf)
+        }
+        end := line_cursor_to_abs(buf, w.cursor)
+        if end > start { end, start = start, end }
+        apply_operator(ed, op.kind, end, start)
+
+    case key.codepoint == 'e':
+        start := line_cursor_to_abs(buf, w.cursor)
+        for i := 0; i < count; i += 1 {
+            cursor_move_word_end_forward(&w.cursor, buf)
+        }
+        end := line_cursor_to_abs(buf, w.cursor) + 1
+        apply_operator(ed, op.kind, start, end)
+
+    case key.codepoint == 'E':
+        start := line_cursor_to_abs(buf, w.cursor)
+        for i := 0; i < count; i += 1 {
+            cursor_move_WORD_end_forward(&w.cursor, buf)
+        }
+        end := line_cursor_to_abs(buf, w.cursor) + 1
+        apply_operator(ed, op.kind, start, end)
+
+    case key.codepoint == 'h' || key.special == .Arrow_Left:
+        start := line_cursor_to_abs(buf, w.cursor)
+        cursor_move_left(&w.cursor, buf)
+        end := line_cursor_to_abs(buf, w.cursor)
+        apply_operator(ed, op.kind, end, start)
+
+    case key.codepoint == 'l' || key.special == .Arrow_Right:
+        start := line_cursor_to_abs(buf, w.cursor)
+        cursor_move_right(&w.cursor, buf)
+        end := line_cursor_to_abs(buf, w.cursor)
+        apply_operator(ed, op.kind, start, end)
+
+    case key.codepoint == 'j' || key.special == .Arrow_Down:
+        start := line_cursor_to_abs(buf, w.cursor)
+        cursor_move_down(&w.cursor, buf, count)
+        end := line_to_abs_pos(buf, w.cursor.row) + w.cursor.col
+        apply_operator(ed, op.kind, start, end)
+
+    case key.codepoint == 'k' || key.special == .Arrow_Up:
+        start := line_cursor_to_abs(buf, w.cursor)
+        cursor_move_up(&w.cursor, buf, count)
+        end := line_to_abs_pos(buf, w.cursor.row) + w.cursor.col
+        if end > start { end, start = start, end }
+        apply_operator(ed, op.kind, end, start)
+
+    case key.codepoint == '0':
+        start := line_cursor_to_abs(buf, w.cursor)
+        end := line_to_abs_pos(buf, w.cursor.row)
+        apply_operator(ed, op.kind, end, start)
+
+    case key.codepoint == '$':
+        start := line_cursor_to_abs(buf, w.cursor)
+        line := pt_get_line(&buf.piece_table, w.cursor.row)
+        end := line_to_abs_pos(buf, w.cursor.row) + len(line)
+        apply_operator(ed, op.kind, start, end)
+
+    case key.codepoint == '^':
+        start := line_cursor_to_abs(buf, w.cursor)
+        cursor_move_to_first_nonblank(&w.cursor, buf)
+        end := line_cursor_to_abs(buf, w.cursor)
+        apply_operator(ed, op.kind, end, start)
+
+    case key.codepoint == 'G':
+        start := line_cursor_to_abs(buf, w.cursor)
+        if ed.count_buf_len > 0 {
+            cursor_move_to_line(&w.cursor, buf, count - 1)
+        } else {
+            cursor_move_to_last_line(&w.cursor, buf)
+        }
+        end := line_cursor_to_abs(buf, w.cursor) + line_byte_length(buf, w.cursor.row)
+        apply_operator(ed, op.kind, start, end)
+
+    case key.codepoint == 'g':
+        ed_pending_two_key(ed, "g", proc(ed: ^Editor, key: Key) {
+            if key.codepoint == 'g' {
+                op, _ := ed.pending_op.?
+                w := ed.active_window
+                buf := w.buffer
+                start := line_cursor_to_abs(buf, w.cursor)
+                cursor_move_to_first_line(&w.cursor, buf)
+                end := line_cursor_to_abs(buf, w.cursor) + line_byte_length(buf, w.cursor.row)
+                apply_operator(ed, op.kind, start, end)
+            }
+        })
+
+    case key.codepoint == 'w' || key.codepoint == 'W' ||
+         key.codepoint == 'i' || key.codepoint == 'a':
+        handle_text_object(ed, key)
+
+    case:
+        ed.mode = .Normal
+        ed.pending_op = nil
+    }
+}
+
+apply_operator :: proc(ed: ^Editor, kind: Operator_Kind, start, end: int) {
+    w := ed.active_window
+    buf := w.buffer
+    if end <= start { ed.mode = .Normal; ed.pending_op = nil; return }
+
+    pos := min(start, end)
+    length := abs(end - start)
+
+    #partial switch kind {
+    case .Delete:
+        text := pt_substring(&buf.piece_table, pos, length)
+        ed.unnamed_register = text
+        pt_delete(&buf.piece_table, pos, length)
+        buf.modified = true
+        if w.cursor.row >= buf.piece_table.line_count {
+            w.cursor.row = buf.piece_table.line_count - 1
+        }
+
+    case .Yank:
+        text := pt_substring(&buf.piece_table, pos, length)
+        ed.unnamed_register = text
+
+    case .Change:
+        text := pt_substring(&buf.piece_table, pos, length)
+        ed.unnamed_register = text
+        pt_delete(&buf.piece_table, pos, length)
+        buf.modified = true
+        if w.cursor.row >= buf.piece_table.line_count {
+            w.cursor.row = buf.piece_table.line_count - 1
+        }
+        insert_mode_enter(ed)
+        ed.mode = .Insert
+        ed.prev_mode = .Normal
+
+    case:
+        ed.mode = .Normal
+    }
+
+    ed.pending_op = nil
+    scroll_into_view(w)
 }
 
 command_mode_handle_key :: proc(ed: ^Editor, key: Key) {
@@ -121,7 +336,11 @@ command_mode_handle_key :: proc(ed: ^Editor, key: Key) {
         if len(cmd) > 0 {
             append(&ed.command_history, strings.clone(cmd))
         }
-        execute_command(ed, cmd)
+        if ed.mode == .Search_Forward || ed.mode == .Search_Backward {
+            search_execute(ed, cmd)
+        } else {
+            execute_command(ed, cmd)
+        }
         ed.command_buf_len = 0
         if ed.mode != .Normal && ed.mode != .Insert {
             ed.mode = .Normal
@@ -141,6 +360,9 @@ command_mode_handle_key :: proc(ed: ^Editor, key: Key) {
             ed.command_buf_len -= 1
         }
 
+    case key.special == .Tab:
+        tab_complete(ed)
+
     case key.codepoint != 0:
         if ed.command_buf_len < cap(ed.command_buf) {
             ch := u8(key.codepoint)
@@ -150,10 +372,29 @@ command_mode_handle_key :: proc(ed: ^Editor, key: Key) {
     }
 }
 
+tab_complete :: proc(ed: ^Editor) {
+    if ed.command_buf_len == 0 { return }
+    cmd := string(ed.command_buf[:ed.command_buf_len])
+    commands := []string{"q", "q!", "w", "wq", "x", "e ", "edit ", "bn", "bnext", "bp", "bprev", "b ", "ls", "buffers", "noh", "nohlsearch", "help", "version", "sp", "vsp", "new", "vnew", "tabnew", "tabc", "tabn", "tabp", "set", "colorscheme", "source"}
+
+    for c in commands {
+        if strings.has_prefix(c, cmd) && c != cmd {
+            clear(&ed.command_buf)
+            append(&ed.command_buf, ..transmute([]u8)c)
+            ed.command_buf_len = len(c)
+            return
+        }
+    }
+}
+
 execute_command :: proc(ed: ^Editor, cmd: string) {
     if cmd == "" { return }
 
     switch {
+    case strings.has_prefix(cmd, "noh") || cmd == "nohlsearch":
+        ed.message = ""
+        clear_search_highlight(ed)
+
     case cmd == "q" || strings.has_prefix(cmd, "q"):
         if strings.contains(cmd, "!") {
             ed.running = false
@@ -245,9 +486,6 @@ execute_command :: proc(ed: ^Editor, cmd: string) {
     case strings.has_prefix(cmd, "ls") || strings.has_prefix(cmd, "buffers"):
         list_buffers(ed)
 
-    case strings.has_prefix(cmd, "noh") || cmd == "nohlsearch":
-        ed.message = ""
-
     case strings.has_prefix(cmd, "h") || strings.has_prefix(cmd, "help"):
         ed.message = "kine - Odin Modal Text Editor (Phase 1)"
 
@@ -300,7 +538,14 @@ editor_init :: proc() -> bool {
     ed.unnamed_register = ""
     ed.count_buf_len = 0
     ed.pending_two_key = nil
+    ed.pending_op = nil
     ed.last_change = Last_Change{}
+    ed.color_mode = detect_color_mode()
+    ed.search_pattern = ""
+    ed.search_direction = 1
+    ed.jumplist = make([dynamic]Jump_Entry, 0, 100)
+    ed.jump_idx = -1
+    log_init()
 
     if !enter_raw_mode(&ed.term_state) {
         fmt.eprintln("Failed to enter raw mode")
@@ -376,6 +621,7 @@ editor_shutdown :: proc() {
     ob_flush(&ed.output_buf)
 
     exit_raw_mode(&ed.term_state)
+    log_destroy()
 }
 
 editor_resize :: proc() {
@@ -415,4 +661,477 @@ ordered_remove :: proc(arr: ^[dynamic]$T, index: int) {
         arr[i] = arr[i + 1]
     }
     resize(arr, len(arr) - 1)
+}
+
+clear_search_highlight :: proc(ed: ^Editor) {
+    ed.search_pattern = ""
+}
+
+search_execute :: proc(ed: ^Editor, pattern: string) {
+    if pattern == "" { return }
+    ed.search_pattern = strings.clone(pattern)
+    w := ed.active_window
+    buf := w.buffer
+    search_forward(ed, buf, 1)
+}
+
+search_forward :: proc(ed: ^Editor, buf: ^Buffer, dir: int) {
+    if ed.search_pattern == "" { return }
+    w := ed.active_window
+    pattern := ed.search_pattern
+    start := line_cursor_to_abs(buf, w.cursor) + (1 if dir > 0 else 0)
+    total := buf.piece_table.char_count
+    dir_sign := dir
+
+    if dir_sign > 0 {
+        for pos := start; pos < total; pos += 1 {
+            if pos + len(pattern) <= total {
+                match := true
+                for i := 0; i < len(pattern); i += 1 {
+                    if pt_char_at(&buf.piece_table, pos + i) != pattern[i] {
+                        match = false
+                        break
+                    }
+                }
+                if match {
+                    line := 0
+                    for ls in buf.piece_table.line_starts {
+                        if ls > pos { break }
+                        line += 1
+                    }
+                    line -= 1
+                    line_start := buf.piece_table.line_starts[line]
+                    w.cursor.row = line
+                    w.cursor.col = pos - line_start
+                    w.cursor.preferred_col = w.cursor.col
+                    scroll_into_view(w)
+                    return
+                }
+            }
+        }
+        for pos := 0; pos < start; pos += 1 {
+            if pos + len(pattern) <= total {
+                match := true
+                for i := 0; i < len(pattern); i += 1 {
+                    if pt_char_at(&buf.piece_table, pos + i) != pattern[i] {
+                        match = false
+                        break
+                    }
+                }
+                if match {
+                    line := 0
+                    for ls in buf.piece_table.line_starts {
+                        if ls > pos { break }
+                        line += 1
+                    }
+                    line -= 1
+                    line_start := buf.piece_table.line_starts[line]
+                    w.cursor.row = line
+                    w.cursor.col = pos - line_start
+                    w.cursor.preferred_col = w.cursor.col
+                    scroll_into_view(w)
+                    return
+                }
+            }
+        }
+    } else {
+        for pos := start - 1; pos >= 0; pos -= 1 {
+            if pos + len(pattern) <= total {
+                match := true
+                for i := 0; i < len(pattern); i += 1 {
+                    if pt_char_at(&buf.piece_table, pos + i) != pattern[i] {
+                        match = false
+                        break
+                    }
+                }
+                if match {
+                    line := 0
+                    for ls in buf.piece_table.line_starts {
+                        if ls > pos { break }
+                        line += 1
+                    }
+                    line -= 1
+                    line_start := buf.piece_table.line_starts[line]
+                    w.cursor.row = line
+                    w.cursor.col = pos - line_start
+                    w.cursor.preferred_col = w.cursor.col
+                    scroll_into_view(w)
+                    return
+                }
+            }
+        }
+        for pos := total - 1; pos >= start; pos -= 1 {
+            if pos + len(pattern) <= total {
+                match := true
+                for i := 0; i < len(pattern); i += 1 {
+                    if pt_char_at(&buf.piece_table, pos + i) != pattern[i] {
+                        match = false
+                        break
+                    }
+                }
+                if match {
+                    line := 0
+                    for ls in buf.piece_table.line_starts {
+                        if ls > pos { break }
+                        line += 1
+                    }
+                    line -= 1
+                    line_start := buf.piece_table.line_starts[line]
+                    w.cursor.row = line
+                    w.cursor.col = pos - line_start
+                    w.cursor.preferred_col = w.cursor.col
+                    scroll_into_view(w)
+                    return
+                }
+            }
+        }
+    }
+    ed.message = fmt.tprintf("Pattern not found: %s", pattern)
+}
+
+search_word_under_cursor :: proc(ed: ^Editor, dir: int) {
+    w := ed.active_window
+    buf := w.buffer
+    line := pt_get_line(&buf.piece_table, w.cursor.row)
+    if len(line) == 0 { return }
+
+    start := w.cursor.col
+    for start > 0 && is_word_char(line[start]) { start -= 1 }
+    if !is_word_char(line[start]) && start < len(line) - 1 { start += 1 }
+
+    end := w.cursor.col
+    for end < len(line) && is_word_char(line[end]) { end += 1 }
+
+    if end > start {
+        word := strings.clone(line[start:end])
+        ed.search_pattern = word
+        w.cursor.col = start
+        w.cursor.preferred_col = start
+        search_forward(ed, buf, dir)
+    }
+}
+
+// jump_back :: proc(ed: ^Editor) {
+//     if ed.jump_idx > 0 {
+//         ed.jump_idx -= 1
+//         entry := ed.jumplist[ed.jump_idx]
+//         for buf in ed.buffers {
+//             if buf.id == entry.buf_id {
+//                 ed.active_window.buffer = buf
+//                 ed.active_window.cursor.row = entry.row
+//                 ed.active_window.cursor.col = entry.col
+//                 ed.active_window.cursor.preferred_col = entry.col
+//                 break
+//             }
+//         }
+//     }
+// }
+
+// jump_forward :: proc(ed: ^Editor) {
+//     if ed.jump_idx < len(ed.jumplist) - 1 {
+//         ed.jump_idx += 1
+//         entry := ed.jumplist[ed.jump_idx]
+//         for buf in ed.buffers {
+//             if buf.id == entry.buf_id {
+//                 ed.active_window.buffer = buf
+//                 ed.active_window.cursor.row = entry.row
+//                 ed.active_window.cursor.col = entry.col
+//                 ed.active_window.cursor.preferred_col = entry.col
+//                 break
+//             }
+//         }
+//     }
+// }
+
+visual_mode_handle_key :: proc(ed: ^Editor, key: Key) {
+    w := ed.active_window
+    if w == nil { ed.mode = .Normal; return }
+
+    buf := w.buffer
+
+    switch {
+    case key.special == .Escape:
+        ed.mode = .Normal
+        clear_visual(ed)
+
+    case key.codepoint == 'v' && key.mods == nil:
+        if ed.mode == .Visual_Char {
+            ed.mode = .Normal
+            clear_visual(ed)
+        }
+
+    case key.codepoint == 'V' && key.mods == nil:
+        if ed.mode == .Visual_Line {
+            ed.mode = .Normal
+            clear_visual(ed)
+        }
+
+    case .Ctrl in key.mods && (key.codepoint == 'v' || key.codepoint == 22):
+        if ed.mode == .Visual_Block {
+            ed.mode = .Normal
+            clear_visual(ed)
+        }
+
+    case key.codepoint == 'd' || key.codepoint == 'x' || key.special == .Delete:
+        vs, has_vs := w.cursor.visual_start.?
+        if has_vs {
+            start := min(vs.x, w.cursor.row)
+            end := max(vs.x, w.cursor.row) + 1
+            abs_start := line_to_abs_pos(buf, start)
+            abs_end := line_to_abs_pos(buf, end)
+            if abs_end > buf.piece_table.char_count { abs_end = buf.piece_table.char_count }
+            if abs_end > abs_start {
+                text := pt_substring(&buf.piece_table, abs_start, abs_end - abs_start)
+                ed.unnamed_register = text
+                pt_delete(&buf.piece_table, abs_start, abs_end - abs_start)
+                buf.modified = true
+            }
+        }
+        clear_visual(ed)
+        ed.mode = .Normal
+        scroll_into_view(w)
+
+    case key.codepoint == 'y' || key.codepoint == 'Y':
+        vs, has_vs := w.cursor.visual_start.?
+        if has_vs {
+            start := min(vs.x, w.cursor.row)
+            end := max(vs.x, w.cursor.row) + 1
+            abs_start := line_to_abs_pos(buf, start)
+            abs_end := line_to_abs_pos(buf, end)
+            if abs_end > buf.piece_table.char_count { abs_end = buf.piece_table.char_count }
+            if abs_end > abs_start {
+                text := pt_substring(&buf.piece_table, abs_start, abs_end - abs_start)
+                ed.unnamed_register = text
+            }
+        }
+        clear_visual(ed)
+        ed.mode = .Normal
+
+    case key.codepoint == 'c':
+        vs, has_vs := w.cursor.visual_start.?
+        if has_vs {
+            start := min(vs.x, w.cursor.row)
+            end := max(vs.x, w.cursor.row) + 1
+            abs_start := line_to_abs_pos(buf, start)
+            abs_end := line_to_abs_pos(buf, end)
+            if abs_end > buf.piece_table.char_count { abs_end = buf.piece_table.char_count }
+            if abs_end > abs_start {
+                text := pt_substring(&buf.piece_table, abs_start, abs_end - abs_start)
+                ed.unnamed_register = text
+                pt_delete(&buf.piece_table, abs_start, abs_end - abs_start)
+                buf.modified = true
+            }
+        }
+        clear_visual(ed)
+        insert_mode_enter(ed)
+        ed.mode = .Insert
+        ed.prev_mode = .Normal
+        w.cursor.col = 0
+        w.cursor.preferred_col = 0
+        scroll_into_view(w)
+
+    case key.codepoint == '>' && key.mods == nil:
+        vs, has_vs := w.cursor.visual_start.?
+        if has_vs {
+            start := min(vs.x, w.cursor.row)
+            end := max(vs.x, w.cursor.row)
+            for line := start; line <= end; line += 1 {
+                pos := line_to_abs_pos(buf, line)
+                pt_insert(&buf.piece_table, pos, "\t")
+                buf.modified = true
+            }
+        }
+        clear_visual(ed)
+        ed.mode = .Normal
+        scroll_into_view(w)
+
+    case key.codepoint == '<' && key.mods == nil:
+        vs, has_vs := w.cursor.visual_start.?
+        if has_vs {
+            start := min(vs.x, w.cursor.row)
+            end := max(vs.x, w.cursor.row)
+            for line := start; line <= end; line += 1 {
+                pos := line_to_abs_pos(buf, line)
+                if pos < buf.piece_table.char_count {
+                    ch := pt_char_at(&buf.piece_table, pos)
+                    if ch == '\t' || ch == ' ' {
+                        pt_delete(&buf.piece_table, pos, 1)
+                        buf.modified = true
+                    }
+                }
+            }
+        }
+        clear_visual(ed)
+        ed.mode = .Normal
+        scroll_into_view(w)
+
+    case:
+        normal_mode_handle_key(ed, key)
+        if ed.mode != .Visual_Char && ed.mode != .Visual_Line && ed.mode != .Visual_Block {
+            ed.mode = .Visual_Char
+        }
+    }
+}
+
+handle_text_object :: proc(ed: ^Editor, key: Key) {
+    _ = ed.active_window
+    op, has_op := ed.pending_op.?
+    if !has_op { ed.mode = .Normal; return }
+    _ = op // Explicitly suppress unused compiler warning
+
+    _ = key.codepoint // Suppress unused code assignment
+    ed_pending_two_key(ed, "text_obj", proc(ed: ^Editor, second_key: Key) {
+        w := ed.active_window
+        buf := w.buffer
+        op, _ := ed.pending_op.?
+
+        // Retrieve op_type from the first key (stored in pending_two_key context)
+        // For now, we'll determine inner/outer from the second key context
+        // This is a simplified version - full implementation would need proper closure capture
+        inner: bool = false
+        kind := second_key.codepoint
+
+        line := pt_get_line(&buf.piece_table, w.cursor.row)
+        _ = line_cursor_to_abs(buf, w.cursor)
+        line_start := line_to_abs_pos(buf, w.cursor.row)
+
+        start, end: int = 0, 0
+
+        switch kind {
+        case 'w':
+            if inner {
+                s := w.cursor.col
+                for s > 0 && is_word_char(line[s - 1]) { s -= 1 }
+                e := w.cursor.col
+                for e < len(line) && is_word_char(line[e]) { e += 1 }
+                if e <= s { ed.mode = .Normal; return }
+                start = line_start + s
+                end = line_start + e
+            } else {
+                s := w.cursor.col
+                for s > 0 && is_word_char(line[s - 1]) { s -= 1 }
+                e := w.cursor.col
+                for e < len(line) && is_word_char(line[e]) { e += 1 }
+                for s > 0 && !is_word_char(line[s - 1]) { s -= 1 }
+                for e < len(line) && !is_word_char(line[e]) { e += 1 }
+                start = line_start + s
+                end = line_start + e
+            }
+
+        case '(', ')', 'b':
+            open := u8('('); close := u8(')')
+            d := 0; found := false
+            for i := w.cursor.col; i >= 0; i -= 1 {
+                if line[i] == close { d += 1 }
+                if line[i] == open { d -= 1; if d < 0 { start = line_start + i; found = true; break } }
+            }
+            if !found { ed.mode = .Normal; return }
+            d = 0; found = false
+            for i := w.cursor.col; i < len(line); i += 1 {
+                if line[i] == open { d += 1 }
+                if line[i] == close { d -= 1; if d < 0 { end = line_start + i + 1; found = true; break } }
+            }
+            if !found { ed.mode = .Normal; return }
+            if !inner { start -= 1; end += 1 }
+
+        case '[', ']':
+            open := u8('['); close := u8(']')
+            d := 0; found := false
+            for i := w.cursor.col; i >= 0; i -= 1 {
+                if line[i] == close { d += 1 }
+                if line[i] == open { d -= 1; if d < 0 { start = line_start + i; found = true; break } }
+            }
+            if !found { ed.mode = .Normal; return }
+            d = 0; found = false
+            for i := w.cursor.col; i < len(line); i += 1 {
+                if line[i] == open { d += 1 }
+                if line[i] == close { d -= 1; if d < 0 { end = line_start + i + 1; found = true; break } }
+            }
+            if !found { ed.mode = .Normal; return }
+            if !inner { start -= 1; end += 1 }
+
+        case '{', '}', 'B':
+            open := u8('{'); close := u8('}')
+            d := 0; found := false
+            for i := w.cursor.col; i >= 0; i -= 1 {
+                if line[i] == close { d += 1 }
+                if line[i] == open { d -= 1; if d < 0 { start = line_start + i; found = true; break } }
+            }
+            if !found { ed.mode = .Normal; return }
+            d = 0; found = false
+            for i := w.cursor.col; i < len(line); i += 1 {
+                if line[i] == open { d += 1 }
+                if line[i] == close { d -= 1; if d < 0 { end = line_start + i + 1; found = true; break } }
+            }
+            if !found { ed.mode = .Normal; return }
+            if !inner { start -= 1; end += 1 }
+
+        case '\'', '\"', '`':
+            kind_u8 := u8(kind)
+            for i := w.cursor.col - 1; i >= 0; i -= 1 {
+                if line[i] == kind_u8 { start = line_start + i; break }
+            }
+            for i := w.cursor.col; i < len(line); i += 1 {
+                if line[i] == kind_u8 { end = line_start + i + 1; break }
+            }
+            if !inner { start -= 1; end += 1 }
+
+        case:
+            ed.mode = .Normal
+            ed.pending_op = nil
+            return
+        }
+
+        if end > start {
+            apply_operator(ed, op.kind, start, end)
+        }
+    })
+}
+
+add_jump :: proc(ed: ^Editor) {
+    w := ed.active_window
+    buf := w.buffer
+    entry := Jump_Entry{buf_id = buf.id, row = w.cursor.row, col = w.cursor.col}
+    if ed.jump_idx < len(ed.jumplist) - 1 {
+        resize(&ed.jumplist, ed.jump_idx + 1)
+    }
+    append(&ed.jumplist, entry)
+    if len(ed.jumplist) > 100 {
+        ordered_remove(&ed.jumplist, 0)
+    }
+    ed.jump_idx = len(ed.jumplist) - 1
+}
+
+jump_back :: proc(ed: ^Editor) {
+    if ed.jump_idx <= 0 { return }
+    w := ed.active_window
+    buf := w.buffer
+    current := Jump_Entry{buf_id = buf.id, row = w.cursor.row, col = w.cursor.col}
+    if ed.jump_idx >= len(ed.jumplist) {
+        append(&ed.jumplist, current)
+    } else {
+        ed.jumplist[ed.jump_idx] = current
+    }
+    ed.jump_idx -= 1
+    entry := ed.jumplist[ed.jump_idx]
+    if entry.buf_id == buf.id {
+        w.cursor.row = entry.row
+        w.cursor.col = entry.col
+        w.cursor.preferred_col = entry.col
+        scroll_into_view(w)
+    }
+}
+
+jump_forward :: proc(ed: ^Editor) {
+    if ed.jump_idx >= len(ed.jumplist) - 1 { return }
+    w := ed.active_window
+    buf := w.buffer
+    ed.jump_idx += 1
+    entry := ed.jumplist[ed.jump_idx]
+    if entry.buf_id == buf.id {
+        w.cursor.row = entry.row
+        w.cursor.col = entry.col
+        w.cursor.preferred_col = entry.col
+        scroll_into_view(w)
+    }
 }

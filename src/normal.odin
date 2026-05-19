@@ -15,6 +15,7 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
             ed.count_buf_len = 0
         } else {
             clear_visual(ed)
+            ed.pending_op = nil
         }
         return
     }
@@ -42,8 +43,24 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
         cursor_move_word_forward(&w.cursor, w.buffer)
         scroll_into_view(w)
 
+    case key.codepoint == 'W':
+        cursor_move_WORD_forward(&w.cursor, w.buffer)
+        scroll_into_view(w)
+
     case key.codepoint == 'b':
         cursor_move_word_backward(&w.cursor, w.buffer)
+        scroll_into_view(w)
+
+    case key.codepoint == 'B':
+        cursor_move_WORD_backward(&w.cursor, w.buffer)
+        scroll_into_view(w)
+
+    case key.codepoint == 'e':
+        cursor_move_word_end_forward(&w.cursor, w.buffer)
+        scroll_into_view(w)
+
+    case key.codepoint == 'E':
+        cursor_move_WORD_end_forward(&w.cursor, w.buffer)
         scroll_into_view(w)
 
     case key.codepoint == '0' && key.mods == nil:
@@ -55,8 +72,29 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
     case key.codepoint == '$' && key.mods == nil:
         cursor_move_to_line_end(&w.cursor, w.buffer)
 
-    case key.codepoint == 'e':
-        cursor_move_word_forward(&w.cursor, w.buffer)
+    case key.codepoint == 'g':
+        ed_pending_two_key(ed, "g", proc(ed: ^Editor, key: Key) {
+            w := ed.active_window
+            switch key.codepoint {
+            case 'g':
+                cursor_move_to_first_line(&w.cursor, w.buffer)
+                scroll_into_view(w)
+            case 'e':
+                cursor_move_word_end_backward(&w.cursor, w.buffer)
+                scroll_into_view(w)
+            case 'E':
+                cursor_move_WORD_end_backward(&w.cursor, w.buffer)
+                scroll_into_view(w)
+            }
+        })
+
+    case key.codepoint == 'G' && key.mods == nil:
+        if ed.count_buf_len > 0 {
+            cursor_move_to_line(&w.cursor, w.buffer, count - 1)
+        } else {
+            cursor_move_to_last_line(&w.cursor, w.buffer)
+        }
+        scroll_into_view(w)
 
     case key.special == .Page_Up || key.special == .Page_Down:
         dir := -1 if key.special == .Page_Up else 1
@@ -70,21 +108,110 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
     case key.special == .End:
         cursor_move_to_line_end(&w.cursor, w.buffer)
 
-    case key.codepoint == 'g':
-        ed_pending_two_key(ed, "g", proc(ed: ^Editor, key: Key) {
-            w := ed.active_window
-            if key.codepoint == 'g' {
-                cursor_move_to_first_line(&w.cursor, w.buffer)
-                scroll_into_view(w)
+    case key.codepoint == 'H' && key.mods == nil:
+        cursor_move_to_window_top(&w.cursor, w.buffer, w)
+        scroll_into_view(w)
+
+    case key.codepoint == 'M' && key.mods == nil:
+        cursor_move_to_window_middle(&w.cursor, w.buffer, w)
+        scroll_into_view(w)
+
+    case key.codepoint == 'L' && key.mods == nil:
+        cursor_move_to_window_bottom(&w.cursor, w.buffer, w)
+        scroll_into_view(w)
+
+    case key.codepoint == '{':
+        cursor_move_paragraph_backward(&w.cursor, w.buffer)
+        scroll_into_view(w)
+
+    case key.codepoint == '}':
+        cursor_move_paragraph_forward(&w.cursor, w.buffer)
+        scroll_into_view(w)
+
+    case key.codepoint == '%' && key.mods == nil:
+        cursor_move_to_matching_bracket(&w.cursor, w.buffer)
+        scroll_into_view(w)
+
+    case key.codepoint == '|' && key.mods == nil:
+        c := count
+        w.cursor.col = min(c - 1, max(0, line_byte_length(w.buffer, w.cursor.row) - 1))
+        w.cursor.preferred_col = w.cursor.col
+        scroll_into_view(w)
+
+    case key.codepoint == '+' && key.mods == nil:
+        for i := 0; i < count; i += 1 {
+            cursor_move_to_next_line_first_nonblank(&w.cursor, w.buffer)
+        }
+        scroll_into_view(w)
+
+    case key.codepoint == '-' && key.mods == nil:
+        for i := 0; i < count; i += 1 {
+            cursor_move_to_prev_line_first_nonblank(&w.cursor, w.buffer)
+        }
+        scroll_into_view(w)
+
+    case key.codepoint == 'f' && key.mods == nil:
+        ed_pending_two_key(ed, "f", proc(ed: ^Editor, key: Key) {
+            if key.codepoint != 0 {
+                cursor_find_char(&ed.active_window.cursor, ed.active_window.buffer, u8(key.codepoint), 1, false)
+                scroll_into_view(ed.active_window)
             }
         })
 
-    case key.codepoint == 'G' && key.mods == nil:
-        if ed.count_buf_len > 0 {
-            cursor_move_to_line(&w.cursor, w.buffer, count - 1)
-        } else {
-            cursor_move_to_last_line(&w.cursor, w.buffer)
-        }
+    case key.codepoint == 'F' && key.mods == nil:
+        ed_pending_two_key(ed, "F", proc(ed: ^Editor, key: Key) {
+            if key.codepoint != 0 {
+                cursor_find_char(&ed.active_window.cursor, ed.active_window.buffer, u8(key.codepoint), -1, false)
+                scroll_into_view(ed.active_window)
+            }
+        })
+
+    case key.codepoint == 't' && key.mods == nil:
+        ed_pending_two_key(ed, "t", proc(ed: ^Editor, key: Key) {
+            if key.codepoint != 0 {
+                cursor_find_char(&ed.active_window.cursor, ed.active_window.buffer, u8(key.codepoint), 1, true)
+                scroll_into_view(ed.active_window)
+            }
+        })
+
+    case key.codepoint == 'T' && key.mods == nil:
+        ed_pending_two_key(ed, "T", proc(ed: ^Editor, key: Key) {
+            if key.codepoint != 0 {
+                cursor_find_char(&ed.active_window.cursor, ed.active_window.buffer, u8(key.codepoint), -1, true)
+                scroll_into_view(ed.active_window)
+            }
+        })
+
+    case key.codepoint == ';' && key.mods == nil:
+        cursor_repeat_find(&w.cursor, w.buffer, 1)
+        scroll_into_view(w)
+
+    case key.codepoint == ',' && key.mods == nil:
+        cursor_repeat_find(&w.cursor, w.buffer, -1)
+        scroll_into_view(w)
+
+    case key.codepoint == 'n' && key.mods == nil:
+        search_forward(ed, w.buffer, ed.search_direction)
+        scroll_into_view(w)
+
+    case key.codepoint == 'N' && key.mods == nil:
+        search_forward(ed, w.buffer, -ed.search_direction)
+        scroll_into_view(w)
+
+    case key.codepoint == '*' && key.mods == nil:
+        search_word_under_cursor(ed, 1)
+        scroll_into_view(w)
+
+    case key.codepoint == '#' && key.mods == nil:
+        search_word_under_cursor(ed, -1)
+        scroll_into_view(w)
+
+    case .Ctrl in key.mods && key.codepoint == 'o':
+        jump_back(ed)
+        scroll_into_view(w)
+
+    case .Ctrl in key.mods && (key.codepoint == 'i' || key.special == .Tab):
+        jump_forward(ed)
         scroll_into_view(w)
 
     case key.codepoint == 'i':
@@ -140,7 +267,34 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
         ed.mode = .Insert
         ed.prev_mode = .Normal
 
-    case key.codepoint == 'x':
+    case key.codepoint == 's' && key.mods == nil:
+        buf := w.buffer
+        pos := line_cursor_to_abs(buf, w.cursor)
+        if pos < buf.piece_table.char_count {
+            pt_delete(&buf.piece_table, pos, 1)
+            buf.modified = true
+        }
+        insert_mode_enter(ed)
+        ed.mode = .Insert
+        ed.prev_mode = .Normal
+
+    case key.codepoint == 'S' && key.mods == nil:
+        buf := w.buffer
+        pos := line_to_abs_pos(buf, w.cursor.row)
+        line_len := line_byte_length(buf, w.cursor.row)
+        end_pos := pos + line_len + 1
+        if end_pos > buf.piece_table.char_count {
+            end_pos = buf.piece_table.char_count
+        }
+        if end_pos > pos {
+            pt_delete(&buf.piece_table, pos, end_pos - pos)
+            buf.modified = true
+        }
+        insert_mode_enter(ed)
+        ed.mode = .Insert
+        ed.prev_mode = .Normal
+
+    case key.codepoint == 'x' && key.mods == nil:
         buf := w.buffer
         if w.cursor.row < buf.piece_table.line_count {
             pos := line_cursor_to_abs(buf, w.cursor)
@@ -159,7 +313,7 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
         }
         scroll_into_view(w)
 
-    case key.codepoint == 'X':
+    case key.codepoint == 'X' && key.mods == nil:
         buf := w.buffer
         pos := line_cursor_to_abs(buf, w.cursor)
         if pos > 0 {
@@ -171,49 +325,70 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
         }
         scroll_into_view(w)
 
-    case key.codepoint == 'd' && key.mods == nil:
-        buf := w.buffer
-        pos := line_to_abs_pos(buf, w.cursor.row)
-        line_len := line_byte_length(buf, w.cursor.row)
-        end_pos := pos + line_len + 1
-        if end_pos > buf.piece_table.char_count {
-            end_pos = buf.piece_table.char_count
-        }
-        if end_pos > pos {
-            pt_delete(&buf.piece_table, pos, end_pos - pos)
-            buf.modified = true
-        }
-        w.cursor.col = 0
-        w.cursor.preferred_col = 0
-        if w.cursor.row >= buf.piece_table.line_count {
-            w.cursor.row = buf.piece_table.line_count - 1
+    case (key.codepoint == 'd' && key.mods == nil):
+        if ed.count_buf_len > 0 && count > 0 {
+            buf := w.buffer
+            pos := line_to_abs_pos(buf, w.cursor.row)
+            end_line := min(w.cursor.row + count - 1, buf.piece_table.line_count - 1)
+            end_pos := line_to_abs_pos(buf, end_line) + line_byte_length(buf, end_line) + 1
+            if end_pos > buf.piece_table.char_count { end_pos = buf.piece_table.char_count }
+            if end_pos > pos {
+                text := pt_substring(&buf.piece_table, pos, end_pos - pos)
+                ed.unnamed_register = text
+                pt_delete(&buf.piece_table, pos, end_pos - pos)
+                buf.modified = true
+            }
+            if w.cursor.row >= buf.piece_table.line_count {
+                w.cursor.row = buf.piece_table.line_count - 1
+            }
+            w.cursor.col = 0
+            w.cursor.preferred_col = 0
+        } else {
+            ed.mode = .Operator_Pending
+            ed.pending_op = Pending_Op{kind = .Delete, count = count}
         }
         scroll_into_view(w)
 
-    case key.codepoint == 'D':
+    case key.codepoint == 'D' && key.mods == nil:
         buf := w.buffer
         pos := line_cursor_to_abs(buf, w.cursor)
         line_len := line_byte_length(buf, w.cursor.row)
         from_col := pos + w.cursor.col
         to_col := pos + line_len
         if to_col > from_col {
+            text := pt_substring(&buf.piece_table, from_col, to_col - from_col)
+            ed.unnamed_register = text
             pt_delete(&buf.piece_table, from_col, to_col - from_col)
             buf.modified = true
         }
         scroll_into_view(w)
 
-    case key.codepoint == 'y' && key.mods == nil:
-        buf := w.buffer
-        pos := line_to_abs_pos(buf, w.cursor.row)
-        line_len := line_byte_length(buf, w.cursor.row)
-        end_pos := pos + line_len + 1
-        if end_pos > buf.piece_table.char_count {
-            end_pos = buf.piece_table.char_count
-        }
-        yanked_text := pt_substring(&buf.piece_table, pos, end_pos - pos)
-        ed.unnamed_register = yanked_text
+    case (key.codepoint == 'c' && key.mods == nil):
+        ed.mode = .Operator_Pending
+        ed.pending_op = Pending_Op{kind = .Change, count = count}
 
-    case key.codepoint == 'Y':
+    case key.codepoint == 'C' && key.mods == nil:
+        buf := w.buffer
+        pos := line_cursor_to_abs(buf, w.cursor)
+        line_len := line_byte_length(buf, w.cursor.row)
+        from_col := pos + w.cursor.col
+        to_col := pos + line_len
+        if to_col > from_col {
+            text := pt_substring(&buf.piece_table, from_col, to_col - from_col)
+            ed.unnamed_register = text
+            pt_delete(&buf.piece_table, from_col, to_col - from_col)
+            buf.modified = true
+        }
+        insert_mode_enter(ed)
+        ed.mode = .Insert
+        ed.prev_mode = .Normal
+        scroll_into_view(w)
+
+    case (key.codepoint == 'y' && key.mods == nil):
+        ed.mode = .Operator_Pending
+        ed.pending_op = Pending_Op{kind = .Yank, count = count}
+
+    case key.codepoint == 'Y' && key.mods == nil:
         buf := w.buffer
         pos := line_to_abs_pos(buf, w.cursor.row)
         line_len := line_byte_length(buf, w.cursor.row)
@@ -244,6 +419,35 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
             buf.modified = true
             scroll_into_view(w)
         }
+
+    case key.codepoint == '>' && key.mods == nil:
+        buf := w.buffer
+        pos := line_to_abs_pos(buf, w.cursor.row)
+        pt_insert(&buf.piece_table, pos, "\t")
+        buf.modified = true
+        w.cursor.col += 1
+        w.cursor.preferred_col = w.cursor.col
+        scroll_into_view(w)
+
+    case key.codepoint == '<' && key.mods == nil:
+        buf := w.buffer
+        pos := line_to_abs_pos(buf, w.cursor.row)
+        if pos < buf.piece_table.char_count {
+            ch := pt_char_at(&buf.piece_table, pos)
+            if ch == '\t' || ch == ' ' {
+                pt_delete(&buf.piece_table, pos, 1)
+                buf.modified = true
+                if w.cursor.col > 0 {
+                    w.cursor.col -= 1
+                    w.cursor.preferred_col = w.cursor.col
+                }
+            }
+        }
+        scroll_into_view(w)
+
+    case key.codepoint == '=' && key.mods == nil:
+        ed.mode = .Operator_Pending
+        ed.pending_op = Pending_Op{kind = .AutoIndent, count = count}
 
     case key.codepoint == 'u' && key.mods == nil:
         undo_handler(ed)
@@ -277,11 +481,13 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
 
     case key.codepoint == '/' && key.mods == nil:
         ed.mode = .Search_Forward
+        ed.search_direction = 1
         ed.command_buf_len = 0
         ed.command_buf = {}
 
     case key.codepoint == '?' && key.mods == nil:
         ed.mode = .Search_Backward
+        ed.search_direction = -1
         ed.command_buf_len = 0
         ed.command_buf = {}
 
@@ -369,6 +575,11 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
 
     case .Ctrl in key.mods && key.codepoint == 'y':
         scroll_lines(ed.active_window, -1)
+
+    case .Ctrl in key.mods && key.codepoint == 'g':
+        buf := w.buffer
+        ed.message = fmt.tprintf("%s  %dL  %dC  (%d%%)", buf.name, buf.piece_table.line_count, buf.piece_table.char_count,
+            (w.cursor.row * 100) / max(1, buf.piece_table.line_count))
 
     case key.codepoint >= '1' && key.codepoint <= '9':
         ed_add_count_digit(ed, int(key.codepoint - '0'))
