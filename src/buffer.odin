@@ -386,7 +386,11 @@ buffer_open :: proc(path: string) -> (^Buffer, Error) {
     buf.id = editor_next_buffer_id()
     buf.filepath = strings.clone(path)
     name_idx := strings.last_index(path, "/")
-    buf.name = strings.clone(path[name_idx:])
+    if name_idx == -1 {
+        buf.name = strings.clone(path)
+    } else {
+        buf.name = strings.clone(path[name_idx:])
+    }
     buf.modified = false
     buf.readonly = false
     buf.filetype = detect_filetype(path)
