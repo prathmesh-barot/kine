@@ -23,14 +23,15 @@ Piece :: struct {
 }
 
 Piece_Table :: struct {
-    original:    string,
-    add_buffer:  [dynamic]u8,
-    head:        ^Piece,
-    tail:        ^Piece,
-    piece_pool:  [dynamic]Piece,
-    char_count:  int,
-    line_count:  int,
-    line_starts: [dynamic]int,
+    original:       string,
+    original_data:  [dynamic]u8,
+    add_buffer:     [dynamic]u8,
+    head:           ^Piece,
+    tail:           ^Piece,
+    piece_pool:     [dynamic]Piece,
+    char_count:     int,
+    line_count:     int,
+    line_starts:    [dynamic]int,
 }
 
 Buffer :: struct {
@@ -38,6 +39,7 @@ Buffer :: struct {
     filepath:        string,
     name:            string,
     piece_table:     Piece_Table,
+    undo_stack:      Undo_Stack,
     modified:        bool,
     readonly:        bool,
     filetype:        string,
@@ -70,7 +72,9 @@ Undo_Stack :: struct {
 }
 
 pt_init :: proc(pt: ^Piece_Table, original: string) {
-    pt.original = original
+    pt.original_data = make([dynamic]u8, len(original))
+    copy(pt.original_data[:], transmute([]u8)original)
+    pt.original = string(pt.original_data[:])
     pt.add_buffer = make([dynamic]u8, 0, 1024)
     pt.piece_pool = make([dynamic]Piece, 0, 64)
     pt.line_starts = make([dynamic]int, 0, 64)
@@ -86,6 +90,7 @@ pt_init :: proc(pt: ^Piece_Table, original: string) {
 }
 
 pt_destroy :: proc(pt: ^Piece_Table) {
+    delete(pt.original_data)
     delete(pt.add_buffer)
     delete(pt.piece_pool)
     delete(pt.line_starts)
@@ -175,15 +180,30 @@ pt_delete :: proc(pt: ^Piece_Table, pos: int, length: int) {
     piece, offset := find_piece_at(pt, pos)
     if piece == nil { return }
 
-    split_piece(pt, piece, offset)
+    if offset > 0 {
+        split_piece(pt, piece, offset)
+    }
 
     end_pos := pos + del_len
     end_piece, end_offset := find_piece_at(pt, end_pos)
     if end_piece == nil { return }
-    split_piece(pt, end_piece, end_offset)
+    if end_offset > 0 {
+        split_piece(pt, end_piece, end_offset)
+    }
 
-    start_piece := piece.next
-    end_piece_stop := end_piece.next
+    start_piece: ^Piece
+    if offset > 0 {
+        start_piece = piece.next
+    } else {
+        start_piece = piece
+    }
+
+    end_piece_stop: ^Piece
+    if end_offset > 0 {
+        end_piece_stop = end_piece.next
+    } else {
+        end_piece_stop = end_piece
+    }
 
     p := start_piece
     for p != nil && p != end_piece_stop {
@@ -193,11 +213,20 @@ pt_delete :: proc(pt: ^Piece_Table, pos: int, length: int) {
     }
 
     if start_piece != nil {
-        piece.next = end_piece_stop
-        if end_piece_stop != nil {
-            end_piece_stop.prev = piece
+        if start_piece.prev != nil {
+            start_piece.prev.next = end_piece_stop
+            if end_piece_stop != nil {
+                end_piece_stop.prev = start_piece.prev
+            } else {
+                pt.tail = start_piece.prev
+            }
         } else {
-            pt.tail = piece
+            pt.head = end_piece_stop
+            if end_piece_stop != nil {
+                end_piece_stop.prev = nil
+            } else {
+                pt.tail = nil
+            }
         }
     }
 
@@ -337,6 +366,48 @@ detect_line_endings :: proc(data: []byte) -> Line_Ending {
     return .LF
 }
 
+strip_bom :: proc(data: []u8) -> []u8 {
+    if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+        result := make([]u8, len(data) - 3)
+        copy(result, data[3:])
+        return result
+    }
+    if len(data) >= 2 {
+        if (data[0] == 0xFE && data[1] == 0xFF) || (data[0] == 0xFF && data[1] == 0xFE) {
+            result := make([]u8, len(data) - 2)
+            copy(result, data[2:])
+            return result
+        }
+    }
+    return data
+}
+
+detect_encoding :: proc(data: []u8) -> string {
+    if len(data) >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF {
+        return "utf-8"
+    }
+    if len(data) >= 2 {
+        if data[0] == 0xFE && data[1] == 0xFF {
+            return "utf-16be"
+        }
+        if data[0] == 0xFF && data[1] == 0xFE {
+            return "utf-16le"
+        }
+    }
+    for i in 0 ..< min(len(data), 8192) {
+        if data[i] >= 0x80 {
+            if i + 1 < len(data) && (data[i] & 0xE0) == 0xC0 && (data[i + 1] & 0xC0) == 0x80 {
+                continue
+            }
+            if i + 2 < len(data) && (data[i] & 0xF0) == 0xE0 && (data[i + 1] & 0xC0) == 0x80 && (data[i + 2] & 0xC0) == 0x80 {
+                continue
+            }
+            return "latin-1"
+        }
+    }
+    return "utf-8"
+}
+
 detect_filetype :: proc(path: string) -> string {
     ext_idx := strings.last_index(path, ".")
     if ext_idx == -1 { return "text" }
@@ -368,6 +439,9 @@ buffer_open :: proc(path: string) -> (^Buffer, Error) {
     file_size := len(data)
     is_large := file_size > 10 * 1024 * 1024
 
+    encoding := detect_encoding(data)
+    data = strip_bom(data)
+
     line_ending := detect_line_endings(data)
 
     normalized := make([dynamic]u8, 0, len(data))
@@ -389,17 +463,21 @@ buffer_open :: proc(path: string) -> (^Buffer, Error) {
     if name_idx == -1 {
         buf.name = strings.clone(path)
     } else {
-        buf.name = strings.clone(path[name_idx:])
+        buf.name = strings.clone(path[name_idx+1:])
     }
     buf.modified = false
     buf.readonly = false
     buf.filetype = detect_filetype(path)
-    buf.encoding = "utf-8"
+    buf.encoding = encoding
     buf.line_ending = line_ending
     buf.tab_width = DEFAULT_TAB_WIDTH
     buf.expand_tabs = false
     buf.large_file = is_large
     buf.last_saved_seq = 0
+
+    if !is_large {
+        undo_stack_init(&buf.undo_stack)
+    }
 
     pt_init(&buf.piece_table, string(normalized[:]))
     return buf, nil
@@ -480,6 +558,9 @@ buffer_reload :: proc(buf: ^Buffer) -> Error {
     defer delete(data)
 
     pt_destroy(&buf.piece_table)
+
+    buf.encoding = detect_encoding(data)
+    data = strip_bom(data)
 
     line_ending := detect_line_endings(data)
     buf.line_ending = line_ending

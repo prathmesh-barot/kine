@@ -239,15 +239,7 @@ normal_mode_handle_key :: proc(ed: ^Editor, key: Key) {
     case key.codepoint == 'o' && key.mods == nil:
         buf := w.buffer
         pos := line_to_abs_pos(buf, w.cursor.row) + line_byte_length(buf, w.cursor.row)
-        if pos > 0 && pt_char_at(&buf.piece_table, pos - 1) != '\n' {
-            pt_insert(&buf.piece_table, pos, "\n")
-            pos += 1
-        } else if pos < buf.piece_table.char_count && pt_char_at(&buf.piece_table, pos) != '\n' {
-            pt_insert(&buf.piece_table, pos, "\n")
-        } else {
-            pt_insert(&buf.piece_table, pos, "\n")
-        }
-        pos += 1
+        pt_insert(&buf.piece_table, pos, "\n")
         buf.modified = true
         w.cursor.row += 1
         w.cursor.col = 0

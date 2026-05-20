@@ -31,15 +31,19 @@ read_byte :: proc() -> (u8, bool) {
 
 read_bytes_timeout :: proc(buf: []u8, timeout_ms: int) -> (int, bool) {
     total := 0
-    for total < len(buf) {
+    max_attempts := (timeout_ms + 9) / 10
+    attempts := 0
+    for total < len(buf) && attempts < max_attempts {
         n, err := os.read(os.stdin, buf[total:])
         if err != nil {
             return total, false
         }
         if n == 0 {
-            break
+            attempts += 1
+        } else {
+            total += n
+            attempts = 0
         }
-        total += n
     }
     return total, total > 0
 }
@@ -55,17 +59,22 @@ read_key :: proc() -> (Key, bool) {
     }
 
     if byte_val <= 0x1a {
-        ctrl_val := byte_val + 0x60
-        if ctrl_val == 0x09 {
+        if byte_val == 0x09 {
             return Key{special = .Tab}, true
         }
-        if ctrl_val == 0x0d {
+        if byte_val == 0x0d {
             return Key{special = .Enter}, true
         }
-        if ctrl_val == 0x1b {
+        if byte_val == 0x1b {
             return Key{special = .Escape}, true
         }
-        return Key{codepoint = rune(ctrl_val), mods = {.Ctrl}}, true
+        if byte_val == 0x08 {
+            return Key{special = .Backspace}, true
+        }
+        if byte_val == 0x00 {
+            return Key{codepoint = ' ', mods = {.Ctrl}}, true
+        }
+        return Key{codepoint = rune(byte_val + 0x60), mods = {.Ctrl}}, true
     }
 
     if byte_val == 0x7f {
@@ -216,3 +225,85 @@ read_escape_sequence :: proc() -> (Key, bool) {
 
     return Key{special = .Escape}, true
 }
+
+Mouse_Button :: enum {
+    Left,
+    Middle,
+    Right,
+    None,
+    Scroll_Up,
+    Scroll_Down,
+}
+
+Mouse_Event :: struct {
+    button:   Mouse_Button,
+    col:      int,
+    row:      int,
+    pressed:  bool,
+}
+
+parse_mouse_event :: proc(buf: []u8, n: int) -> (Mouse_Event, bool) {
+    if n < 3 { return Mouse_Event{}, false }
+
+    pos := 0
+    if buf[pos] == '<' { pos += 1 }
+
+    cb_start := pos
+    for pos < n && buf[pos] != ';' { pos += 1 }
+    if pos >= n { return Mouse_Event{}, false }
+    cb := 0
+    for i := cb_start; i < pos; i += 1 {
+        if buf[i] >= '0' && buf[i] <= '9' {
+            cb = cb * 10 + int(buf[i] - '0')
+        }
+    }
+    pos += 1
+
+    cx_start := pos
+    for pos < n && buf[pos] != ';' { pos += 1 }
+    if pos >= n { return Mouse_Event{}, false }
+    cx := 0
+    for i := cx_start; i < pos; i += 1 {
+        if buf[i] >= '0' && buf[i] <= '9' {
+            cx = cx * 10 + int(buf[i] - '0')
+        }
+    }
+    pos += 1
+
+    cy_start := pos
+    for pos < n && buf[pos] != 'm' && buf[pos] != 'M' { pos += 1 }
+    if pos >= n { return Mouse_Event{}, false }
+    cy := 0
+    for i := cy_start; i < pos; i += 1 {
+        if buf[i] >= '0' && buf[i] <= '9' {
+            cy = cy * 10 + int(buf[i] - '0')
+        }
+    }
+
+    pressed := buf[pos] == 'M'
+
+    button: Mouse_Button
+    if cb == 64 {
+        button = .Scroll_Up
+    } else if cb == 65 {
+        button = .Scroll_Down
+    } else if cb == 0 || cb == 32 {
+        button = .Left
+    } else if cb == 1 || cb == 33 {
+        button = .Middle
+    } else if cb == 2 || cb == 34 {
+        button = .Right
+    } else {
+        button = .None
+    }
+
+    return Mouse_Event{button = button, col = cx - 1, row = cy - 1, pressed = pressed}, true
+}
+
+Bracketed_Paste_State :: enum {
+    Inactive,
+    Active,
+}
+
+bracketed_paste_state: Bracketed_Paste_State = .Inactive
+paste_buffer: [dynamic]u8

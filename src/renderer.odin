@@ -299,6 +299,7 @@ mode_to_string :: proc(m: Mode) -> string {
     case .Search_Forward: return "SEARCH"
     case .Search_Backward: return "SEARCH"
     case .Operator_Pending: return "OPERATOR PENDING"
+    case .Insert_Completion: return "INSERT (COMPLETION)"
     }
     return ""
 }

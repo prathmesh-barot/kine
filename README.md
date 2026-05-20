@@ -6,6 +6,8 @@ kine is a terminal-based modal text editor inspired by vim, written entirely in 
 
 Requires [Odin dev-2026-05](https://odin-lang.org).
 
+Check out the [OdinUP](https://github.com/prathmesh-barot/odinup). which is the native version manager for Odin, Ols and Odin fmt.
+
 ```bash
 git clone <this-repo>
 cd kine

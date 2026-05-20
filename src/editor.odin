@@ -125,7 +125,7 @@ process_key :: proc(ed: ^Editor, key: Key) {
     switch ed.mode {
     case .Normal:
         normal_mode_handle_key(ed, key)
-    case .Insert, .Replace:
+    case .Insert, .Replace, .Insert_Completion:
         insert_mode_handle_key(ed, key)
     case .Command, .Search_Forward, .Search_Backward:
         command_mode_handle_key(ed, key)
@@ -395,27 +395,48 @@ execute_command :: proc(ed: ^Editor, cmd: string) {
         ed.message = ""
         clear_search_highlight(ed)
 
-    case cmd == "q" || strings.has_prefix(cmd, "q"):
-        if strings.contains(cmd, "!") {
-            ed.running = false
-        } else {
-            modified := false
-            for buf in ed.buffers {
-                if buf.modified { modified = true; break }
-            }
-            if modified {
-                ed.message = "No write since last change (add ! to force)"
+    case cmd == "wq" || cmd == "x":
+        if ed.active_window != nil && ed.active_window.buffer != nil {
+            buf := ed.active_window.buffer
+            err := buffer_save(buf, buf.filepath)
+            if err != nil {
+                ed.message = fmt.tprintf("Error saving: %v", err)
                 return
             }
-            ed.running = false
         }
+        ed.running = false
 
-    case strings.has_prefix(cmd, "w") || cmd == "x":
+    case cmd == "q!":
+        ed.running = false
+
+    case cmd == "q" || strings.has_prefix(cmd, "quit"):
+        modified := false
+        for buf in ed.buffers {
+            if buf.modified { modified = true; break }
+        }
+        if modified {
+            ed.message = "No write since last change (add ! to force)"
+            return
+        }
+        ed.running = false
+
+    case cmd == "qa" || cmd == "qa!":
+        ed.running = false
+
+    case cmd == "wa":
+        for buf in ed.buffers {
+            if buf.filepath != "" {
+                buffer_save(buf, buf.filepath)
+            }
+        }
+        ed.message = "All buffers saved"
+
+    case strings.has_prefix(cmd, "w ") || cmd == "w":
         save_cmd := cmd
         space_idx := strings.index(save_cmd, " ")
         save_path := ""
         if space_idx != -1 {
-            save_path = save_cmd[space_idx + 1:]
+            save_path = strings.trim_space(save_cmd[space_idx + 1:])
         }
         if ed.active_window != nil && ed.active_window.buffer != nil {
             buf := ed.active_window.buffer
@@ -432,19 +453,6 @@ execute_command :: proc(ed: ^Editor, cmd: string) {
             }
         }
 
-    case cmd == "wq":
-        if ed.active_window != nil && ed.active_window.buffer != nil {
-            buf := ed.active_window.buffer
-            err := buffer_save(buf, buf.filepath)
-            if err != nil {
-                ed.message = fmt.tprintf("Error saving: %v", err)
-                return
-            }
-        }
-        modified := false
-        for b in ed.buffers { if b.modified { modified = true; break } }
-        if !modified { ed.running = false }
-
     case strings.has_prefix(cmd, "e ") || strings.has_prefix(cmd, "edit "):
         space_idx := strings.index(cmd, " ")
         if space_idx != -1 {
@@ -453,11 +461,13 @@ execute_command :: proc(ed: ^Editor, cmd: string) {
             if err != nil {
                 ed.message = fmt.tprintf("Cannot open '%s': %v", path, err)
             } else {
+                if ed.active_window != nil {
+                    ed.active_window.buffer = buf
+                    cursor_init(&ed.active_window.cursor)
+                    ed.active_window.scroll_row = 0
+                    ed.active_window.scroll_col = 0
+                }
                 append(&ed.buffers, buf)
-                ed.active_window.buffer = buf
-                cursor_init(&ed.active_window.cursor)
-                ed.active_window.scroll_row = 0
-                ed.active_window.scroll_col = 0
                 ed.message = fmt.tprintf("'%s' %dL, %dB", buf.name, buf.piece_table.line_count, buf.piece_table.char_count)
             }
         }
@@ -491,6 +501,13 @@ execute_command :: proc(ed: ^Editor, cmd: string) {
 
     case strings.has_prefix(cmd, "version"):
         ed.message = "kine v0.1.0 - Odin dev-2026-05"
+
+    case strings.has_prefix(cmd, "set "):
+        space_idx := strings.index(cmd, " ")
+        if space_idx != -1 {
+            opt := strings.trim_space(cmd[space_idx + 1:])
+            ed.message = fmt.tprintf("Option '%s' not yet implemented", opt)
+        }
 
     case:
         ed.message = fmt.tprintf("Unknown command: %s", strings.split(cmd, " ")[0])

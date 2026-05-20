@@ -11,4 +11,5 @@ Mode :: enum {
     Command,
     Search_Forward,
     Search_Backward,
+    Insert_Completion,
 }
